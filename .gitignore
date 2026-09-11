@@ -1,0 +1,3 @@
+# User-specific presets (monitor name, chosen modes/scale/profiles) --
+# machine-specific state, not part of the plugin itself.
+settings.json
