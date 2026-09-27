@@ -83,6 +83,17 @@ function resolutionOf(mode) {
   return parsed ? parsed.width + "x" + parsed.height : ""
 }
 
+// Both end up inside Lua source for `hyprctl eval`, which Hyprland runs with
+// the user's full privileges, so anything read back from settings.json has
+// to be a plain number / plain output name before it gets anywhere near it.
+function isValidScale(scale) {
+  return /^\d+(\.\d+)?$/.test(String(scale || "")) && Number(scale) > 0
+}
+
+function isValidOutputName(name) {
+  return /^[A-Za-z0-9._-]+$/.test(String(name || ""))
+}
+
 // ---------------------------------------------------------- scale presets
 
 var SCALE_PRESETS = ["1", "1.25", "1.6", "2", "3", "4"]

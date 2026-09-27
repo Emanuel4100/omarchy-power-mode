@@ -236,7 +236,7 @@ Item {
     var mon = root.currentMonitor()
     var parsed = Model.parseModeString(modeString)
 
-    if (mon && parsed && scale) {
+    if (mon && parsed && Model.isValidScale(scale) && Model.isValidOutputName(mon.name)) {
       var lua = "hl.monitor({ output = \"" + mon.name + "\", mode = \""
         + parsed.width + "x" + parsed.height + "@" + parsed.hz + "\", position = \""
         + mon.x + "x" + mon.y + "\", scale = " + scale + " })"
