@@ -94,6 +94,16 @@ function isValidOutputName(name) {
   return /^[A-Za-z0-9._-]+$/.test(String(name || ""))
 }
 
+// True when the monitor already runs this mode/scale, so applying it again
+// would only cause a pointless modeset.
+function monitorMatches(mon, parsed, scale) {
+  if (!mon || !parsed) return false
+  return mon.width === parsed.width
+    && mon.height === parsed.height
+    && Math.round(mon.refreshRate) === parsed.hz
+    && Math.abs(Number(mon.scale) - Number(scale)) < 0.01
+}
+
 // ---------------------------------------------------------- scale presets
 
 var SCALE_PRESETS = ["1", "1.25", "1.6", "2", "3", "4"]
@@ -174,6 +184,7 @@ if (typeof module !== "undefined") {
     cleanScale: cleanScale,
     scaleOptionsFor: scaleOptionsFor,
     parseProfiles: parseProfiles,
-    profileLabel: profileLabel
+    profileLabel: profileLabel,
+    monitorMatches: monitorMatches
   }
 }

@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Services.UPower
+import Quickshell.Hyprland
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -30,6 +31,7 @@ Item {
   property var monitors: []
   property var profiles: []
   property bool pendingApply: false
+  property bool applyingFromEvent: false
   property bool settingsLoaded: false
 
   property string monitorSetting: ""
@@ -39,6 +41,22 @@ Item {
   property string batteryProfile: ""
   property string acScale: ""
   property string batteryScale: ""
+
+  // Who owns the display mode. "auto" (default) steps aside when another
+  // monitor manager (hyprmoncfgd) is running, "on" always manages it, "off"
+  // never does. Two tools each re-applying their own refresh rate on every
+  // config reload ping-pong the panel between modes and make it flicker,
+  // so exactly one of them should be in charge.
+  property string displayControl: "auto"
+  property bool externalManager: false
+  readonly property bool controlsDisplay: displayControl === "on"
+    || (displayControl === "auto" && !externalManager)
+
+  // Loop breaker for re-applies triggered by Hyprland events: if the
+  // preset keeps getting reverted, something else is fighting over the
+  // display, so stop until the power source changes or "Apply now".
+  property var eventApplyTimes: []
+  property bool conflictPaused: false
 
   // v1 -> v2 settings migration (old versions stored a bare Hz number
   // instead of a full "WxH@Hz" mode string). -1 = nothing to migrate.
@@ -100,6 +118,8 @@ Item {
     root.batteryProfile = String(parsed.batteryProfile || "")
     root.acScale = String(parsed.acScale || "")
     root.batteryScale = String(parsed.batteryScale || "")
+    var control = String(parsed.displayControl || "auto")
+    root.displayControl = ["auto", "on", "off"].indexOf(control) !== -1 ? control : "auto"
 
     root.pendingAcHzMigration = (!root.acModeSetting && parsed.acHz) ? Number(parsed.acHz) : -1
     root.pendingBatteryHzMigration = (!root.batteryModeSetting && parsed.batteryHz) ? Number(parsed.batteryHz) : -1
@@ -116,7 +136,8 @@ Item {
       acProfile: root.acProfile,
       batteryProfile: root.batteryProfile,
       acScale: root.acScale,
-      batteryScale: root.batteryScale
+      batteryScale: root.batteryScale,
+      displayControl: root.displayControl
     }
     settingsFile.setText(JSON.stringify(data, null, 2) + "\n")
   }
@@ -218,14 +239,31 @@ Item {
   }
 
   function refresh() {
+    if (!managerProc.running) managerProc.running = true
     if (!monitorsProc.running) monitorsProc.running = true
     if (!profilesProc.running) profilesProc.running = true
   }
 
+  // Explicit applies (power source changed, "Apply now", startup) clear
+  // the loop breaker; event-driven ones go through requestEventApply().
   function requestApply() {
     if (!root.settingsLoaded) return
+    root.conflictPaused = false
+    root.eventApplyTimes = []
+    root.startApply(false)
+  }
+
+  // Checks for an external monitor manager first, then reads the live
+  // monitor state, then applies (managerProc -> monitorsProc -> doApply).
+  function startApply(fromEvent) {
+    root.applyingFromEvent = !!fromEvent
     root.pendingApply = true
-    if (!monitorsProc.running) monitorsProc.running = true
+    if (!managerProc.running) managerProc.running = true
+  }
+
+  function requestEventApply() {
+    if (!root.settingsLoaded || root.conflictPaused) return
+    eventDebounce.restart()
   }
 
   function doApply() {
@@ -235,8 +273,22 @@ Item {
     var profile = mode === "battery" ? root.batteryProfile : root.acProfile
     var mon = root.currentMonitor()
     var parsed = Model.parseModeString(modeString)
+    var fromEvent = root.applyingFromEvent
+    root.applyingFromEvent = false
 
-    if (mon && parsed && Model.isValidScale(scale) && Model.isValidOutputName(mon.name)) {
+    // Skipping a mode that's already live avoids a needless modeset (each
+    // one blanks the panel for a moment) -- e.g. at every boot on AC.
+    var wantDisplay = root.controlsDisplay && !root.conflictPaused
+      && !!mon && !!parsed && Model.isValidScale(scale) && Model.isValidOutputName(mon.name)
+      && !Model.monitorMatches(mon, parsed, scale)
+
+    if (wantDisplay && fromEvent && !root.recordEventApply()) {
+      console.warn("power-mode: display preset keeps getting reverted (another monitor manager?); pausing display switching until the power source changes or Apply now")
+      root.conflictPaused = true
+      wantDisplay = false
+    }
+
+    if (wantDisplay) {
       var lua = "hl.monitor({ output = \"" + mon.name + "\", mode = \""
         + parsed.width + "x" + parsed.height + "@" + parsed.hz + "\", position = \""
         + mon.x + "x" + mon.y + "\", scale = " + scale + " })"
@@ -246,10 +298,22 @@ Item {
       hyprProc.running = true
     }
 
-    if (profile) {
+    // A config reload doesn't touch the power profile, so only explicit
+    // applies need to set it.
+    if (profile && !fromEvent) {
       profileProc.command = ["omarchy-powerprofiles-set", mode, profile]
       profileProc.running = true
     }
+  }
+
+  // Allows at most 3 event-driven display changes per minute.
+  function recordEventApply() {
+    var now = Date.now()
+    var recent = root.eventApplyTimes.filter(function(t) { return now - t < 60000 })
+    if (recent.length >= 3) return false
+    recent.push(now)
+    root.eventApplyTimes = recent
+    return true
   }
 
   Component.onCompleted: root.refresh()
@@ -259,7 +323,46 @@ Item {
     function onOnBatteryChanged() { root.requestApply() }
   }
 
+  // hyprctl eval (used by doApply()) is a one-shot runtime call, not
+  // persistent config -- anything that makes Hyprland (re)source its config
+  // (theme switches, hyprctl reload, a shell restart, ...) can silently
+  // overwrite it with whatever monitors.lua's own static hl.monitor(...)
+  // directive says (e.g. mode = "preferred"). Re-applying the active preset
+  // on these Hyprland IPC events, in addition to the AC/battery watcher
+  // above, corrects that instead of leaving it clobbered until the next
+  // power-source change. Events are debounced so a burst of them applies
+  // once, and doApply() skips the modeset when the preset is already live.
+  Connections {
+    target: Hyprland
+    function onRawEvent(event) {
+      switch (event.name) {
+      case "configreloaded":
+      case "monitoradded":
+      case "monitoraddedv2":
+      case "monitorremoved":
+      case "monitorremovedv2":
+        root.requestEventApply()
+        break
+      }
+    }
+  }
+
+  Timer { id: eventDebounce; interval: 1500; onTriggered: root.startApply(true) }
+
   Timer { interval: 5000; running: root.opened; repeat: true; onTriggered: root.refresh() }
+
+  // hyprmoncfgd re-applies its own saved layout (refresh rate included)
+  // whenever Hyprland's config reloads, so in "auto" mode the display is
+  // left to it. Its --power-aware-refresh flag covers AC/battery refresh.
+  Process {
+    id: managerProc
+    command: ["pgrep", "-x", "hyprmoncfgd"]
+    stdout: StdioCollector { waitForEnd: true }
+    onExited: function(exitCode) {
+      root.externalManager = exitCode === 0
+      if (root.pendingApply && !monitorsProc.running) monitorsProc.running = true
+    }
+  }
 
   Process {
     id: monitorsProc
@@ -269,7 +372,8 @@ Item {
       onStreamFinished: {
         root.updateMonitors(text)
         root.resolveDefaults()
-        if (root.pendingApply) {
+        // Waits for the external-manager check so startup doesn't race it.
+        if (root.pendingApply && !managerProc.running) {
           root.pendingApply = false
           root.doApply()
         }
@@ -401,6 +505,21 @@ Item {
                   width: parent.width
                 }
               }
+            }
+
+            Text {
+              visible: !root.controlsDisplay || root.conflictPaused
+              textFormat: Text.PlainText
+              text: root.conflictPaused
+                ? "Display switching paused: something else kept reverting the preset. Only the power profile is applied until the power source changes or you press Apply now."
+                : root.externalManager
+                  ? "hyprmoncfgd manages this display, so only the power profile switches here. Run it with --power-aware-refresh for AC/battery refresh rates, or set \"displayControl\": \"on\" in settings.json."
+                  : "Display control is off (\"displayControl\" in settings.json), so only the power profile switches here."
+              color: Color.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+              width: parent.width
             }
 
             // ---------- Display picker (only when more than one output) ----------

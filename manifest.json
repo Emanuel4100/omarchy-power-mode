@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "power-mode",
   "name": "Power Mode",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "author": "emanuel",
   "description": "Switch display refresh rate, resolution, scale, and power profile automatically between AC and battery, with editable presets in the launcher",
   "keepLoaded": true,

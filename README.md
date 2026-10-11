@@ -60,8 +60,35 @@ Then `SUPER+SPACE` → search "Power Mode".
   ever errors), and `omarchy-powerprofiles-set <ac|battery> <profile>` for
   the power profile — the same mechanisms Omarchy's own Display and Power
   panels use.
+- A preset that's already live is never re-applied, so there's no needless
+  modeset (screen blink) at startup or after a config reload.
+- After Hyprland reloads its config or a monitor is (un)plugged, the active
+  preset is re-applied once (debounced). If it keeps getting reverted (3
+  times within a minute), display switching pauses until the power source
+  changes or you press **Apply now**, instead of fighting another tool and
+  making the screen flicker.
 - `"keepLoaded": true` in `manifest.json` keeps the plugin's background logic
   running for the whole shell session, not just while the picker is open.
+
+## Other monitor managers (hyprmoncfg)
+
+[hyprmoncfg](https://github.com/crmne/hyprmoncfg)'s `hyprmoncfgd` re-applies
+its saved layout, refresh rate included, on every config reload. With both
+tools setting the refresh rate, the panel bounces between them at boot. So
+by default (`"displayControl": "auto"` in `settings.json`) Power Mode leaves
+the display alone while `hyprmoncfgd` is running and only switches the
+power profile. Let hyprmoncfgd handle AC/battery refresh by running it with
+`--power-aware-refresh`:
+
+```bash
+systemctl --user edit hyprmoncfgd
+# [Service]
+# ExecStart=
+# ExecStart=/usr/bin/hyprmoncfgd --power-aware-refresh
+```
+
+Set `"displayControl": "on"` to always manage the display anyway, or `"off"`
+to only ever switch the power profile.
 
 ## Uninstall
 
